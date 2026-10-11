@@ -136,6 +136,10 @@ test('--to <repo>[:kind] reaches another repo; Claude by default; --list --all s
     r = t.run('w1:p1', ['--to', 'w2:p2', 'x']);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(t.sent().split('\n')[0], 'w2:p2');
+    // Herdr pane ids past p9 use letters (w8:pH), and they are pane ids too.
+    r = t.run('w1:p1', ['--to', 'w8:pH', 'x']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(t.sent().split('\n')[0], 'w8:pH');
     r = t.run('w1:p1', ['--to', 'nosuch', 'x']);
     assert.equal(r.status, 5);
     assert.match(r.stderr, /no agent pane in a repo named nosuch[\s\S]*other/);

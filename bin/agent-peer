@@ -99,7 +99,7 @@ if [ -z "$target" ]; then
   [ -n "$other" ] || other="$peers"
   [ -n "$other" ] || die "no other agent pane in $self_repo or workspace $self_ws" 5
   target=$(pick_one "$other" "peer") || exit $?
-elif [[ "$target" =~ ^w[^:]*:p[0-9]+$ ]]; then
+elif [[ "$target" =~ ^w[^:]*:p[0-9A-Za-z]+$ ]]; then
   :  # A pane id is used as given.
 elif [[ "$target" =~ ^(claude|codex|pi)$ ]]; then
   # A bare agent kind means a peer of that kind.
