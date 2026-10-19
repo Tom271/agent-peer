@@ -164,3 +164,90 @@ both('--to <repo>[:kind] reaches another repo; Claude by default; --list --all s
   assert.doesNotMatch(t.run('w1:p1', ['--list']).stdout, /w2:p1/);
   assert.match(t.run('w1:p1', ['--list', '--all']).stdout, /w2:p1\s+claude\s+idle\s+other/);
 });
+
+// Everything a shell, cmd.exe or PowerShell might expand, re-quote or split,
+// plus non-ASCII, a newline and a trailing backslash.
+const hostile = '" \' $HOME $(whoami) ` % ! ^ & | < > ; \\ \\\\" é ✓ 中文\nline two ends in \\';
+const envelope = (msg: string) =>
+  `w1:p2\n[agent-peer from:claude pane:w1:p1 repo:repo] ${msg}\n(Reply only if a reply is needed: agent-peer --to w1:p1 "<reply>")`;
+
+both('a hostile message arrives byte for byte, in an LF-joined envelope', (t) => {
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+  const r = t.run('w1:p1', [hostile]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.sent(), envelope(hostile));
+});
+
+both('a message that looks like a path is not rewritten', (t) => {
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+  const r = t.run('w1:p1', ['/invoices returns 500']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.sent(), envelope('/invoices returns 500'));
+});
+
+both('flags arrive intact: -- and -x are refused, not sent', (t) => {
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+  for (const args of [['--', 'x'], ['-x', 'y']]) {
+    const r = t.run('w1:p1', args);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`unknown option ${args[0]}`));
+  }
+  assert.throws(() => t.sent());
+});
+
+const pwshOnly = (name: string, skip: string | false, body: (t: T) => void) =>
+  test(`[pwsh] ${name}`, { skip: impls[1].skip || skip }, () => {
+    const t = setup(impls[1]);
+    try { body(t); } finally { t.cleanup(); }
+  });
+const notWindows = windows ? false : 'Windows only';
+
+// Called in-session, PowerShell drops a bare `--` before the script sees it.
+pwshOnly('a bare -- is refused when called in-session too', false, (t) => {
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+  const script = resolve(root, 'bin/agent-peer.ps1').replace(/'/g, "''");
+  const inSession = { name: 'pwsh', skip: false as const, cmd: 'pwsh', args: ['-NoProfile', '-NonInteractive', '-Command'] };
+  // pwsh -Command reports $?, not the script's exit code, so pass that on.
+  const call = (args: string) => [`& '${script}' ${args}; exit $LASTEXITCODE`];
+  let r = t.run('w1:p1', call('-- x'), {}, inSession);
+  assert.equal(r.status, 2, r.stderr);
+  assert.throws(() => t.sent());
+  // A quoted '--' reaches the script as an argument, and is refused the usual way.
+  r = t.run('w1:p1', call("'--' x"), {}, inSession);
+  assert.equal(r.status, 2, r.stderr);
+  r = t.run('w1:p1', call('--to w1:p2 x'), {}, inSession);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.sent(), envelope('x'));
+});
+
+pwshOnly('a herdr that is a batch file is refused', notWindows, (t) => {
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+  const bat = resolve(t.temp, 'herdr.cmd');
+  writeFileSync(bat, `@echo x> "${resolve(t.temp, 'sent')}"\r\n`);
+  const r = t.run('w1:p1', ['x'], { AGENT_PEER_HERDR: bat });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /batch file/);
+  assert.throws(() => t.sent());
+});
+
+pwshOnly('Windows paths match across separators and letter case', notWindows, (t) => {
+  // Git reports C:/x/y, Herdr C:\x\y; the other pane is in another workspace,
+  // so only the repo match makes it a peer.
+  const shouty = t.repo.replace(/\\/g, '/').toUpperCase();
+  t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w2:p2', 'codex', 'w2', shouty]]);
+  const r = t.run('w1:p1', ['x']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.sent().split('\n')[0], 'w2:p2');
+});
+
+const hasPowershell = windows && found('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']);
+pwshOnly('Windows PowerShell 5.1 relaunches under pwsh with the message intact',
+  !windows ? 'Windows only' : hasPowershell ? false : 'powershell.exe not installed', (t) => {
+    t.agents([['w1:p1', 'claude', 'w1', t.repo], ['w1:p2', 'codex', 'w1', t.repo]]);
+    const ps51 = { name: 'powershell', skip: false as const, cmd: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', resolve(root, 'bin/agent-peer.ps1')] };
+    const r = t.run('w1:p1', [hostile], {}, ps51);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(t.sent(), envelope(hostile));
+    assert.equal(t.run('w1:p1', ['-x', 'y'], {}, ps51).status, 2);
+  });
